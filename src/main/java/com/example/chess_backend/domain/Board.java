@@ -555,6 +555,20 @@ public class Board {
         return copy;
     }
 
+    /**
+     * Wechselt den aktuellen Spieler (für Bot-Simulation).
+     */
+    public void switchTurn() {
+        currentTurn = (currentTurn == Color.WHITE) ? Color.BLACK : Color.WHITE;
+    }
+
+    /**
+     * Setzt das En-Passant-Ziel (für Bot-Simulation).
+     */
+    public void setEnPassantTarget(Position target) {
+        this.enPassantTarget = target;
+    }
+
     private boolean isInside(Position p) {
         return p.row() >= 0 && p.row() < 8 && p.col() >= 0 && p.col() < 8;
     }

@@ -197,6 +197,14 @@ public class ChessBot {
      * Sucht nur noch Schlagzüge um taktische Sequenzen zu Ende zu denken.
      */
     private int quiescence(Board board, Color currentColor, int alpha, int beta, int maxDepth) {
+        // Prüfe Spielende
+        if (board.isCheckmate(currentColor)) {
+            return -(INF + maxDepth);
+        }
+        if (board.isStalemate(currentColor)) {
+            return 0;
+        }
+
         int standPat = evaluate(board, currentColor);
 
         if (maxDepth == 0) return standPat;
@@ -230,6 +238,7 @@ public class ChessBot {
 
     /**
      * Bewertungsfunktion: Positive Werte = gut für currentColor.
+     * Optimiert: Keine teure Mobilitätsberechnung mehr.
      */
     private int evaluate(Board board, Color currentColor) {
         int whiteScore = 0;
@@ -255,12 +264,6 @@ public class ChessBot {
                 }
             }
         }
-
-        // Mobilität: Mehr Züge = besser
-        int whiteMobility = countMobility(board, Color.WHITE);
-        int blackMobility = countMobility(board, Color.BLACK);
-        whiteScore += whiteMobility * 5;
-        blackScore += blackMobility * 5;
 
         // Doppelbauern-Strafe
         whiteScore -= countDoubledPawns(pieces, Color.WHITE) * 20;
@@ -353,19 +356,6 @@ public class ChessBot {
             }
         }
         return true;
-    }
-
-    private int countMobility(Board board, Color color) {
-        int count = 0;
-        Piece[][] pieces = board.getBoardArray();
-        for (int r = 0; r < 8; r++) {
-            for (int c = 0; c < 8; c++) {
-                if (pieces[r][c] != null && pieces[r][c].getColor() == color) {
-                    count += board.getPossibleMoves(new Position(r, c)).size();
-                }
-            }
-        }
-        return count;
     }
 
     private int countDoubledPawns(Piece[][] pieces, Color color) {
@@ -480,12 +470,30 @@ public class ChessBot {
 
     /**
      * Simuliert einen Zug auf einer Kopie des Boards.
+     * Aktualisiert jetzt korrekt currentTurn und enPassantTarget.
      */
     private Board simulateMove(Board board, MoveCandidate move) {
         Board copy = board.copy();
+
+        // Figur merken VOR dem Zug (für En-Passant-Erkennung)
+        Piece movingPiece = copy.getPiece(move.from);
+
         boolean isCastling = copy.isCastlingMove(move.from, move.to);
         boolean isEnPassant = copy.isEnPassantCapture(move.from, move.to);
         copy.applyMove(move.from, move.to, isCastling, isEnPassant, PieceType.QUEEN);
+
+        // Spieler wechseln
+        copy.switchTurn();
+
+        // En Passant Target aktualisieren
+        Position newEnPassantTarget = null;
+        if (movingPiece != null && movingPiece.getType() == PieceType.PAWN
+                && Math.abs(move.to.row() - move.from.row()) == 2) {
+            int targetRow = (move.from.row() + move.to.row()) / 2;
+            newEnPassantTarget = new Position(targetRow, move.from.col());
+        }
+        copy.setEnPassantTarget(newEnPassantTarget);
+
         return copy;
     }
 
