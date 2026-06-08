@@ -10,10 +10,21 @@ import java.util.List;
  *   1 = Leicht  (Tiefe 2)
  *   2 = Mittel  (Tiefe 3)
  *   3 = Schwer  (Tiefe 4)
+ *
+ * Verbesserungen:
+ *   - Knotenlimit verhindert Endlos-Suche
+ *   - Quiescence Search sucht alle Züge wenn im Schach
+ *   - Iterative Deepening mit Zeitlimit
  */
 public class ChessBot {
 
     private static final int INF = 1000000;
+
+    // Maximale Knoten pro Suche (verhindert Hängen)
+    private static final int MAX_NODES = 500000;
+
+    // Zeitlimit in Millisekunden
+    private static final long MAX_TIME_MS = 8000;
 
     // Figurenwerte in Centipawns
     private static final int[] PIECE_VALUES = new int[PieceType.values().length];
@@ -105,10 +116,15 @@ public class ChessBot {
             {-50,-30,-30,-30,-30,-30,-30,-50}
     };
 
-    private final int depth;
+    private final int maxDepth;
+
+    // Such-Statistik (pro Suche)
+    private int nodeCount;
+    private long searchStartTime;
+    private boolean searchAborted;
 
     public ChessBot(int difficulty) {
-        this.depth = switch (difficulty) {
+        this.maxDepth = switch (difficulty) {
             case 1 -> 2;
             case 2 -> 3;
             case 3 -> 4;
@@ -117,7 +133,24 @@ public class ChessBot {
     }
 
     /**
+     * Prüft ob die Suche abgebrochen werden soll (Zeit- oder Knotenlimit).
+     */
+    private boolean shouldAbort() {
+        if (searchAborted) return true;
+        if (nodeCount > MAX_NODES) {
+            searchAborted = true;
+            return true;
+        }
+        if (System.currentTimeMillis() - searchStartTime > MAX_TIME_MS) {
+            searchAborted = true;
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * Berechnet den besten Zug für die gegebene Farbe.
+     * Verwendet Iterative Deepening für zeitbegrenzte Suche.
      */
     public BotMove findBestMove(Board board, Color color) {
         List<MoveCandidate> candidates = getAllLegalMoves(board, color);
@@ -130,19 +163,50 @@ public class ChessBot {
             return Integer.compare(scoreB, scoreA);
         });
 
+        // Such-Statistik zurücksetzen
+        nodeCount = 0;
+        searchStartTime = System.currentTimeMillis();
+        searchAborted = false;
+
         int bestScore = -INF;
         BotMove bestMove = null;
 
-        for (MoveCandidate candidate : candidates) {
-            Board copy = simulateMove(board, candidate);
+        // Iterative Deepening: Suche von Tiefe 1 bis maxDepth
+        for (int currentDepth = 1; currentDepth <= maxDepth; currentDepth++) {
+            int depthBestScore = -INF;
+            BotMove depthBestMove = null;
 
-            Color opponent = (color == Color.WHITE) ? Color.BLACK : Color.WHITE;
-            int score = -negamax(copy, opponent, depth - 1, -INF, INF);
+            for (MoveCandidate candidate : candidates) {
+                if (shouldAbort()) break;
 
-            if (score > bestScore) {
-                bestScore = score;
-                bestMove = new BotMove(candidate.from, candidate.to, bestScore);
+                Board copy = simulateMove(board, candidate);
+                nodeCount++;
+
+                Color opponent = (color == Color.WHITE) ? Color.BLACK : Color.WHITE;
+                int score = -negamax(copy, opponent, currentDepth - 1, -INF, INF);
+
+                if (score > depthBestScore) {
+                    depthBestScore = score;
+                    depthBestMove = new BotMove(candidate.from, candidate.to, score);
+                }
             }
+
+            // Nur aktualisieren wenn die Suche nicht abgebrochen wurde
+            // (unvollständige Ergebnisse sind schlechter als die vorherige Tiefe)
+            if (!searchAborted || depthBestMove == null) {
+                if (depthBestMove != null) {
+                    bestScore = depthBestScore;
+                    bestMove = depthBestMove;
+                }
+            }
+
+            if (searchAborted) break;
+        }
+
+        // Fallback: erster Zug wenn nichts gefunden
+        if (bestMove == null && !candidates.isEmpty()) {
+            MoveCandidate fallback = candidates.get(0);
+            bestMove = new BotMove(fallback.from, fallback.to, 0);
         }
 
         return bestMove;
@@ -153,6 +217,8 @@ public class ChessBot {
      * Gibt die Bewertung aus Sicht des currentColor zurück.
      */
     private int negamax(Board board, Color currentColor, int depth, int alpha, int beta) {
+        if (shouldAbort()) return 0;
+
         // Spielende prüfen
         if (board.isCheckmate(currentColor)) {
             return -(INF + depth); // Matt: je früher desto schlechter
@@ -163,7 +229,7 @@ public class ChessBot {
 
         // Blattknoten
         if (depth == 0) {
-            return quiescence(board, currentColor, alpha, beta, 4);
+            return quiescence(board, currentColor, alpha, beta, 6);
         }
 
         List<MoveCandidate> moves = getAllLegalMoves(board, currentColor);
@@ -176,7 +242,10 @@ public class ChessBot {
         });
 
         for (MoveCandidate move : moves) {
+            if (shouldAbort()) return alpha;
+
             Board copy = simulateMove(board, move);
+            nodeCount++;
 
             Color opponent = (currentColor == Color.WHITE) ? Color.BLACK : Color.WHITE;
             int score = -negamax(copy, opponent, depth - 1, -beta, -alpha);
@@ -194,9 +263,13 @@ public class ChessBot {
 
     /**
      * Quiescence Search: Verhindert "Horizont-Effekt"
-     * Sucht nur noch Schlagzüge um taktische Sequenzen zu Ende zu denken.
+     *
+     * WICHTIG: Wenn die Farbe im Schach steht, werden ALLE Züge gesucht,
+     * nicht nur Schlagzüge (man MUSS dem Schach ausweichen!).
      */
     private int quiescence(Board board, Color currentColor, int alpha, int beta, int maxDepth) {
+        if (shouldAbort()) return 0;
+
         // Prüfe Spielende
         if (board.isCheckmate(currentColor)) {
             return -(INF + maxDepth);
@@ -205,26 +278,41 @@ public class ChessBot {
             return 0;
         }
 
+        boolean inCheck = board.isInCheck(currentColor);
+
         int standPat = evaluate(board, currentColor);
 
         if (maxDepth == 0) return standPat;
 
-        if (standPat >= beta) return beta;
-        if (standPat > alpha) alpha = standPat;
+        // Wenn NICHT im Schach: standPat als untere Grenze
+        // (wir können den Zug ablehnen und standPat behalten)
+        if (!inCheck) {
+            if (standPat >= beta) return beta;
+            if (standPat > alpha) alpha = standPat;
+        }
 
-        // Nur Schlagzüge betrachten
-        List<MoveCandidate> captures = getCaptureMoves(board, currentColor);
-        captures.sort((a, b) -> {
+        // Im Schach: ALLE Züge suchen (Schachabwehr ist Pflicht!)
+        // Nicht im Schach: Nur Schlagzüge suchen
+        List<MoveCandidate> moves;
+        if (inCheck) {
+            moves = getAllLegalMoves(board, currentColor);
+        } else {
+            moves = getCaptureMoves(board, currentColor);
+        }
+
+        moves.sort((a, b) -> {
             int scoreA = getMoveOrderScore(board, a);
             int scoreB = getMoveOrderScore(board, b);
             return Integer.compare(scoreB, scoreA);
         });
 
-        for (MoveCandidate capture : captures) {
-            Board copy = simulateMove(board, capture);
+        for (MoveCandidate move : moves) {
+            Board copy = simulateMove(board, move);
+            nodeCount++;
 
             // Prüfe ob der Zug legal ist (König nicht im Schach)
-            if (copy.isInCheck(currentColor)) continue;
+            // Nur nötig bei Schlagzügen; bei getAllLegalMoves schon geprüft
+            if (!inCheck && copy.isInCheck(currentColor)) continue;
 
             Color opponent = (currentColor == Color.WHITE) ? Color.BLACK : Color.WHITE;
             int score = -quiescence(copy, opponent, -beta, -alpha, maxDepth - 1);
@@ -233,12 +321,14 @@ public class ChessBot {
             if (score > alpha) alpha = score;
         }
 
+        // Im Schach ohne legale Züge = Schachmatt (wird oben geprüft)
+        // Aber falls isCheckmate teuer ist und wir über moves iteriert haben:
+        // alpha enthält den besten Score
         return alpha;
     }
 
     /**
      * Bewertungsfunktion: Positive Werte = gut für currentColor.
-     * Optimiert: Keine teure Mobilitätsberechnung mehr.
      */
     private int evaluate(Board board, Color currentColor) {
         int whiteScore = 0;
@@ -316,7 +406,7 @@ public class ChessBot {
             if (hasPair) baseValue += 30;
         }
 
-        // Freibauer Bonus (Pawn mit keinem gegnerischen Pawn vor sich)
+        // Freibauer Bonus
         if (piece.getType() == PieceType.PAWN) {
             if (isPassedPawn(pieces, row, col, piece.getColor())) {
                 baseValue += 40 + (piece.getColor() == Color.WHITE ? (6 - row) * 10 : (row - 1) * 10);
@@ -343,11 +433,9 @@ public class ChessBot {
         int startRow = row + dir;
 
         for (int r = startRow; r >= 0 && r < 8; r += dir) {
-            // Gleiche Spalte
             if (pieces[r][col] != null && pieces[r][col].getType() == PieceType.PAWN && pieces[r][col].getColor() != color) {
                 return false;
             }
-            // Benachbarte Spalten
             if (col > 0 && pieces[r][col - 1] != null && pieces[r][col - 1].getType() == PieceType.PAWN && pieces[r][col - 1].getColor() != color) {
                 return false;
             }
@@ -417,13 +505,11 @@ public class ChessBot {
         if (kingRow < 0) return 0;
 
         int safety = 0;
-        // König auf rochierte Position = Bonus
         int expectedRow = color == Color.WHITE ? 7 : 0;
         if (kingRow == expectedRow && (kingCol <= 2 || kingCol >= 6)) {
             safety += 40;
         }
 
-        // Bauernschutz vor dem König
         int pawnDir = color == Color.WHITE ? -1 : 1;
         for (int dc = -1; dc <= 1; dc++) {
             int pr = kingRow + pawnDir;
@@ -447,7 +533,6 @@ public class ChessBot {
         Piece attacker = board.getPiece(move.from);
 
         if (target != null) {
-            // Schlagzug: Wert des Opfers - Wert des Angreifers / 10
             score += PIECE_VALUES[target.getType().ordinal()] * 10
                     - PIECE_VALUES[attacker.getType().ordinal()];
         }
@@ -470,22 +555,18 @@ public class ChessBot {
 
     /**
      * Simuliert einen Zug auf einer Kopie des Boards.
-     * Aktualisiert jetzt korrekt currentTurn und enPassantTarget.
      */
     private Board simulateMove(Board board, MoveCandidate move) {
         Board copy = board.copy();
 
-        // Figur merken VOR dem Zug (für En-Passant-Erkennung)
         Piece movingPiece = copy.getPiece(move.from);
 
         boolean isCastling = copy.isCastlingMove(move.from, move.to);
         boolean isEnPassant = copy.isEnPassantCapture(move.from, move.to);
         copy.applyMove(move.from, move.to, isCastling, isEnPassant, PieceType.QUEEN);
 
-        // Spieler wechseln
         copy.switchTurn();
 
-        // En Passant Target aktualisieren
         Position newEnPassantTarget = null;
         if (movingPiece != null && movingPiece.getType() == PieceType.PAWN
                 && Math.abs(move.to.row() - move.from.row()) == 2) {
